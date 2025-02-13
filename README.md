@@ -70,7 +70,7 @@ go to [this section](#usage-for-offline-goal-conditioned-rl).
 To use OGBench for **standard (non-goal-conditioned) offline RL**,
 go to [this section](#usage-for-standard-non-goal-conditioned-offline-rl).
 
-### Usage for *offline goal-conditioned RL*
+### Usage for offline goal-conditioned RL
 
 After installing OGBench, you can create an environment and datasets using `ogbench.make_env_and_datasets`.
 The environment follows the [Gymnasium](https://gymnasium.farama.org/) interface.
@@ -123,7 +123,7 @@ for task_id in [1, 2, 3, 4, 5]:
 You can find a complete example of a training script for offline goal-conditioned RL in the `impls` directory.
 See the next section for more details on the reference implementations.
 
-### Usage for *standard (non-goal-conditioned) offline RL*
+### Usage for standard (non-goal-conditioned) offline RL
 
 OGBench also provides single-task variants of the environments for standard (reward-maximizing) offline RL.
 Each locomotion and manipulation environment provides five different single-task tasks corresponding to the five evaluation goals,
@@ -139,7 +139,7 @@ or for tuning hyperparameters.
 <details>
 <summary><b>Click to see the list of default tasks</b></summary>
 
-|     Environment     | Default task |
+|     Environment     | Default Task |
 |:-------------------:|:------------:|
 |    `pointmaze-*`    |   `task1`    |
 |     `antmaze-*`     |   `task1`    |
@@ -170,7 +170,7 @@ Here is an example of how to use OGBench for standard (non-goal-conditioned) off
 >
 > For example, in `antmaze-large-navigate-singletask-v0`, the dataset contains 1M transitions,
 > with each trajectory having a length of 1000.
-> Hence, `sum(dataset['terminals'])` is exactly 1000 (i.e., `1` at the end of each trajectory),
+> Hence, `sum(dataset['terminals'])` is exactly 1000 (i.e., 1 at the end of each trajectory),
 > whereas `sum(dataset['masks'])` can vary
 > depending on how many times the agent reaches the goal.
 > Note that dataset trajectories do not terminate even when the agent reaches the goal,
