@@ -261,15 +261,15 @@ class GCDataset:
         if geom_sample:
             # Geometric sampling.
             offsets = np.random.geometric(p=1 - self.config['discount'], size=batch_size)  # in [1, inf)
-            middle_goal_idxs = np.minimum(idxs + offsets, final_state_idxs)
+            traj_goal_idxs = np.minimum(idxs + offsets, final_state_idxs)
         else:
             # Uniform sampling.
             distances = np.random.rand(batch_size)  # in [0, 1)
-            middle_goal_idxs = np.round(
+            traj_goal_idxs = np.round(
                 (np.minimum(idxs + 1, final_state_idxs) * distances + final_state_idxs * (1 - distances))
             ).astype(int)
         goal_idxs = np.where(
-            np.random.rand(batch_size) < p_trajgoal / (1.0 - p_curgoal + 1e-6), middle_goal_idxs, random_goal_idxs
+            np.random.rand(batch_size) < p_trajgoal / (1.0 - p_curgoal + 1e-6), traj_goal_idxs, random_goal_idxs
         )
 
         # Goals at the current state.
