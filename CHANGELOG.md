@@ -1,5 +1,8 @@
 # Change log
 
+## ogbench 1.1.1 (2025-03-02)
+- Make it compatible with the latest version of `gymnasium` (1.1.0).
+
 ## ogbench 1.1.0 (2025-02-13)
 - Added `-singletask` environments for standard (i.e., non-goal-conditioned) offline RL.
 - Added `-oraclerep` environments for offline goal-conditioned RL with oracle goal representations.
