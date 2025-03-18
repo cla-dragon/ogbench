@@ -2,6 +2,7 @@ import contextlib
 import os
 import warnings
 
+import gymnasium
 import mujoco
 import numpy as np
 from gymnasium import utils
@@ -90,9 +91,11 @@ class HumanoidEnv(MujocoEnv, utils.EzPickle):
 
     xml_file = os.path.join(os.path.dirname(__file__), 'assets', 'humanoid.xml')
     metadata = {
-        'render_modes': ['human', 'rgb_array', 'depth_array', 'rgbd_tuple'],
+        'render_modes': ['human', 'rgb_array', 'depth_array'],
         'render_fps': 40,
     }
+    if gymnasium.__version__ >= '1.1.0':
+        metadata['render_modes'] += ['rgbd_tuple']
 
     def __init__(
         self,

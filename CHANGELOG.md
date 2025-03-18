@@ -1,5 +1,8 @@
 # Change log
 
+## ogbench 1.1.2 (2025-03-30)
+- Improve compatibility with `gymnasium`.
+
 ## ogbench 1.1.1 (2025-03-02)
 - Make it compatible with the latest version of `gymnasium` (1.1.0).
 
