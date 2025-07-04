@@ -1,13 +1,14 @@
 import json
 import os
+os.environ["MUJOCO_GL"] = "egl"
 import random
 import time
 from collections import defaultdict
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import tqdm
-import wandb
 from absl import app, flags
 from agents import agents
 from ml_collections import config_flags
@@ -15,7 +16,13 @@ from utils.datasets import Dataset, GCDataset, HGCDataset
 from utils.env_utils import make_env_and_datasets
 from utils.evaluation import evaluate
 from utils.flax_utils import restore_agent, save_agent
-from utils.log_utils import CsvLogger, get_exp_name, get_flag_dict, get_wandb_video, setup_wandb
+from utils.log_utils import CsvLogger, get_exp_name, get_flag_dict, get_wandb_video, setup_wandb, get_tensorboard_video
+
+# 新增tensorboard支持
+try:
+    from tensorboardX import SummaryWriter
+except ImportError:
+    SummaryWriter = None
 
 FLAGS = flags.FLAGS
 
@@ -26,10 +33,10 @@ flags.DEFINE_string('save_dir', 'exp/', 'Save directory.')
 flags.DEFINE_string('restore_path', None, 'Restore path.')
 flags.DEFINE_integer('restore_epoch', None, 'Restore epoch.')
 
-flags.DEFINE_integer('train_steps', 1000000, 'Number of training steps.')
+flags.DEFINE_integer('train_steps', 2000000, 'Number of training steps.')
 flags.DEFINE_integer('log_interval', 5000, 'Logging interval.')
 flags.DEFINE_integer('eval_interval', 100000, 'Evaluation interval.')
-flags.DEFINE_integer('save_interval', 1000000, 'Saving interval.')
+flags.DEFINE_integer('save_interval', 2000000, 'Saving interval.')
 
 flags.DEFINE_integer('eval_tasks', None, 'Number of tasks to evaluate (None for all).')
 flags.DEFINE_integer('eval_episodes', 20, 'Number of episodes for each task.')
@@ -39,15 +46,53 @@ flags.DEFINE_integer('video_episodes', 1, 'Number of video episodes for each tas
 flags.DEFINE_integer('video_frame_skip', 3, 'Frame skip for videos.')
 flags.DEFINE_integer('eval_on_cpu', 1, 'Whether to evaluate on CPU.')
 
+flags.DEFINE_string('log_backend', 'tensorboard', 'Logging backend: wandb or tensorboard.')
+
 config_flags.DEFINE_config_file('agent', 'agents/gciql.py', lock_config=False)
 
+# 统一log接口
+class LoggerWrapper:
+    def __init__(self, backend, log_dir, project=None, group=None, name=None):
+        self.backend = backend
+        self.writer = None
+        if backend == 'wandb':
+            import wandb
+            setup_wandb(project=project, group=group, name=name)
+            self.wandb = wandb
+        elif backend == 'tensorboard':
+            assert SummaryWriter is not None, "Tensorboard not installed"
+            self.writer = SummaryWriter(log_dir=log_dir)
+        else:
+            raise ValueError(f"Unknown log backend: {backend}")
+
+    def log(self, metrics, step):
+        if self.backend == 'wandb':
+            self.wandb.log(metrics, step=step)
+        elif self.backend == 'tensorboard':
+            for k, v in metrics.items():
+                if k == 'video':
+                    # tensorboardX支持add_video, 这里假设v为np.ndarray [N,T,C,H,W]
+                    self.writer.add_video('video', v, global_step=step, fps=10)
+                else:
+                    # 只记录数值型
+                    self.writer.add_scalar(k, v, step)
+
+    def close(self):
+        if self.backend == 'tensorboard' and self.writer is not None:
+            self.writer.close()
 
 def main(_):
     # Set up logger.
     exp_name = get_exp_name(FLAGS.seed)
-    setup_wandb(project='OGBench', group=FLAGS.run_group, name=exp_name)
-
-    FLAGS.save_dir = os.path.join(FLAGS.save_dir, wandb.run.project, FLAGS.run_group, exp_name)
+    log_backend = FLAGS.log_backend.lower()
+    log_dir = os.path.join(FLAGS.save_dir, 'tb_logs', FLAGS.run_group, exp_name)
+    if log_backend == 'wandb':
+        logger = LoggerWrapper('wandb', log_dir=None, project='OGBench', group=FLAGS.run_group, name=exp_name)
+        import wandb
+        FLAGS.save_dir = os.path.join(FLAGS.save_dir, wandb.run.project, FLAGS.run_group, exp_name)
+    else:
+        logger = LoggerWrapper('tensorboard', log_dir=log_dir)
+        FLAGS.save_dir = os.path.join(FLAGS.save_dir, 'OGBench', FLAGS.run_group, exp_name)
     os.makedirs(FLAGS.save_dir, exist_ok=True)
     flag_dict = get_flag_dict()
     with open(os.path.join(FLAGS.save_dir, 'flags.json'), 'w') as f:
@@ -106,7 +151,7 @@ def main(_):
             train_metrics['time/epoch_time'] = (time.time() - last_time) / FLAGS.log_interval
             train_metrics['time/total_time'] = time.time() - first_time
             last_time = time.time()
-            wandb.log(train_metrics, step=i)
+            logger.log(train_metrics, step=i)
             train_logger.log(train_metrics, step=i)
 
         # Evaluate agent.
@@ -145,10 +190,13 @@ def main(_):
                 eval_metrics[f'evaluation/overall_{k}'] = np.mean(v)
 
             if FLAGS.video_episodes > 0:
-                video = get_wandb_video(renders=renders, n_cols=num_tasks)
-                eval_metrics['video'] = video
-
-            wandb.log(eval_metrics, step=i)
+                if log_backend == 'wandb':
+                    video = get_wandb_video(renders=renders, n_cols=num_tasks)
+                    eval_metrics['video'] = video
+                elif log_backend == 'tensorboard':
+                    video_arr = get_tensorboard_video(renders=renders)
+                    eval_metrics['video'] = video_arr.astype(np.uint8)  # [N,T,C,H,W]
+            logger.log(eval_metrics, step=i)
             eval_logger.log(eval_metrics, step=i)
 
         # Save agent.
@@ -157,7 +205,7 @@ def main(_):
 
     train_logger.close()
     eval_logger.close()
-
+    logger.close()
 
 if __name__ == '__main__':
     app.run(main)

@@ -58,7 +58,34 @@ class MLP(nn.Module):
                 if self.layer_norm:
                     x = nn.LayerNorm()(x)
         return x
-
+    # @nn.compact
+    # def __call__(self, x):
+    #     # 在进入循环前检查输入
+    #     jax.debug.print("MLP input: shape={}, dtype={}, has_nan={}, has_inf={}", 
+    #                    x.shape, x.dtype, jnp.any(jnp.isnan(x)), jnp.any(jnp.isinf(x)))
+        
+    #     # 确保输入是有效的浮点数
+    #     x = jnp.asarray(x, dtype=jnp.float32)
+        
+    #     for i, size in enumerate(self.hidden_dims):
+    #         jax.debug.print("Pre-dense Layer {}: shape={}, dtype={}, has_nan={}, has_inf={}", 
+    #                        i, x.shape, x.dtype, jnp.any(jnp.isnan(x)), jnp.any(jnp.isinf(x)))
+            
+    #         # 在Dense层之前确保数据有效性
+    #         x = jnp.where(jnp.isnan(x), 0.0, x)  # 将NaN替换为0
+    #         x = jnp.where(jnp.isinf(x), jnp.sign(x) * 1e6, x)  # 限制无穷大值
+            
+    #         x = nn.Dense(size, kernel_init=self.kernel_init)(x)
+            
+    #         jax.debug.print("Post-dense Layer {}: shape={}, dtype={}, has_nan={}, has_inf={}", 
+    #                        i, x.shape, x.dtype, jnp.any(jnp.isnan(x)), jnp.any(jnp.isinf(x)))
+            
+    #         if i + 1 < len(self.hidden_dims) or self.activate_final:
+    #             x = self.activations(x)
+    #             if self.layer_norm:
+    #                 x = nn.LayerNorm()(x)
+                    
+    #     return x
 
 class LengthNormalize(nn.Module):
     """Length normalization layer.

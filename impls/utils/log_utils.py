@@ -144,3 +144,30 @@ def get_wandb_video(renders=None, n_cols=None, fps=15):
     renders = reshape_video(renders, n_cols)  # (t, c, nr * h, nc * w)
 
     return wandb.Video(renders, fps=fps, format='mp4')
+
+def get_tensorboard_video(renders=None):
+    """Return a TensorBoard video.
+
+    It takes a list of videos and reshapes them into a single video with the specified number of columns.
+    """
+    # Pad videos to the same length.
+    max_length = max([len(render) for render in renders])
+    for i, render in enumerate(renders):
+        assert render.dtype == np.uint8
+
+        # Decrease brightness of the padded frames.
+        final_frame = render[-1]
+        final_image = Image.fromarray(final_frame)
+        enhancer = ImageEnhance.Brightness(final_image)
+        final_image = enhancer.enhance(0.5)
+        final_frame = np.array(final_image)
+
+        pad = np.repeat(final_frame[np.newaxis, ...], max_length - len(render), axis=0)
+        renders[i] = np.concatenate([render, pad], axis=0)
+
+        # Add borders.
+        renders[i] = np.pad(renders[i], ((0, 0), (1, 1), (1, 1), (0, 0)), mode='constant', constant_values=0)
+    renders = np.array(renders)  # (n, t, h, w, c)
+    renders = np.transpose(renders, (0, 1, 4, 2, 3))  # (n, t, c, h, w)
+
+    return renders.astype(np.uint8)  # [T,C,H,W]

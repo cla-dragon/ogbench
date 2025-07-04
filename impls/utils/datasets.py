@@ -396,5 +396,5 @@ class HGCDataset(GCDataset):
                         'high_actor_targets',
                     ],
                 )
-
+                
         return batch
