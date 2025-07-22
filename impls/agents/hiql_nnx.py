@@ -1,248 +1,15 @@
-from typing import Any, Optional, Sequence
-
-import flax
+import optax
 import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
 import ml_collections
-import optax
-import distrax
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils.encoders_nnx_v2 import GCEncoder, encoder_modules, MLP
 
+from impls.utils.encoders_nnx import GCEncoder, encoder_modules, MLP
 
-def default_init(scale=1.0):
-    """Default kernel initializer."""
-    return nnx.initializers.variance_scaling(scale, 'fan_avg', 'uniform')
-
-
-class LengthNormalize(nnx.Module):
-    """Length normalization layer."""
-    
-    def __init__(self):
-        pass
-    
-    def __call__(self, x):
-        return x / jnp.linalg.norm(x, axis=-1, keepdims=True) * jnp.sqrt(x.shape[-1])
-
-
-class Identity(nnx.Module):
-    """Identity layer."""
-    
-    def __init__(self):
-        pass
-    
-    def __call__(self, x):
-        return x
-
-
-class TransformedWithMode(distrax.Transformed):
-    """Transformed distribution with mode calculation."""
-
-    def mode(self):
-        return self.bijector.forward(self.distribution.mode())
-
-
-class GCActor(nnx.Module):
-    """Goal-conditioned actor using flax.nnx."""
-    
-    def __init__(
-        self,
-        hidden_dims: Sequence[int],
-        action_dim: int,
-        log_std_min: Optional[float] = -5,
-        log_std_max: Optional[float] = 2,
-        tanh_squash: bool = False,
-        state_dependent_std: bool = False,
-        const_std: bool = True,
-        final_fc_init_scale: float = 1e-2,
-        gc_encoder=None,
-        rngs: nnx.Rngs = None,
-    ):
-        self.action_dim = action_dim
-        self.log_std_min = log_std_min
-        self.log_std_max = log_std_max
-        self.tanh_squash = tanh_squash
-        self.state_dependent_std = state_dependent_std
-        self.const_std = const_std
-        self.final_fc_init_scale = final_fc_init_scale
-        self.gc_encoder = gc_encoder
-        self.rngs = rngs
-        
-        # Create networks with lazy initialization
-        self.actor_net = MLP(hidden_dims, activate_final=True, rngs=rngs)
-        self.mean_net = None  # Will be initialized on first call
-        
-        if state_dependent_std:
-            self.log_std_net = None  # Will be initialized on first call
-        elif not const_std:
-            self.log_stds = nnx.Param(jnp.zeros(action_dim))
-    
-    def __call__(
-        self,
-        observations,
-        goals=None,
-        goal_encoded=False,
-        temperature=1.0,
-    ):
-        """Return the action distribution."""
-        if self.gc_encoder is not None:
-            inputs = self.gc_encoder(observations, goals, goal_encoded=goal_encoded)
-        else:
-            inputs = [observations]
-            if goals is not None:
-                inputs.append(goals)
-            inputs = jnp.concatenate(inputs, axis=-1)
-        
-        outputs = self.actor_net(inputs)
-        
-        # Initialize mean_net on first call
-        if self.mean_net is None:
-            self.mean_net = nnx.Linear(
-                in_features=outputs.shape[-1],
-                out_features=self.action_dim,
-                kernel_init=default_init(self.final_fc_init_scale),
-                rngs=self.rngs,
-            )
-        
-        means = self.mean_net(outputs)
-        
-        if self.state_dependent_std:
-            # Initialize log_std_net on first call
-            if self.log_std_net is None:
-                self.log_std_net = nnx.Linear(
-                    in_features=outputs.shape[-1],
-                    out_features=self.action_dim,
-                    kernel_init=default_init(self.final_fc_init_scale),
-                    rngs=self.rngs,
-                )
-            log_stds = self.log_std_net(outputs)
-        else:
-            if self.const_std:
-                log_stds = jnp.zeros_like(means)
-            else:
-                log_stds = self.log_stds.value
-        
-        log_stds = jnp.clip(log_stds, self.log_std_min, self.log_std_max)
-        
-        distribution = distrax.MultivariateNormalDiag(
-            loc=means, scale_diag=jnp.exp(log_stds) * temperature
-        )
-        if self.tanh_squash:
-            distribution = TransformedWithMode(distribution, distrax.Block(distrax.Tanh(), ndims=1))
-        
-        return distribution
-
-
-class GCDiscreteActor(nnx.Module):
-    """Goal-conditioned actor for discrete actions using flax.nnx."""
-    
-    def __init__(
-        self,
-        hidden_dims: Sequence[int],
-        action_dim: int,
-        final_fc_init_scale: float = 1e-2,
-        gc_encoder=None,
-        rngs: nnx.Rngs = None,
-    ):
-        self.action_dim = action_dim
-        self.final_fc_init_scale = final_fc_init_scale
-        self.gc_encoder = gc_encoder
-        self.rngs = rngs
-        
-        self.actor_net = MLP(hidden_dims, activate_final=True, rngs=rngs)
-        self.logit_net = None  # Will be initialized on first call
-    
-    def __call__(
-        self,
-        observations,
-        goals=None,
-        goal_encoded=False,
-        temperature=1.0,
-    ):
-        """Return the action distribution."""
-        if self.gc_encoder is not None:
-            inputs = self.gc_encoder(observations, goals, goal_encoded=goal_encoded)
-        else:
-            inputs = [observations]
-            if goals is not None:
-                inputs.append(goals)
-            inputs = jnp.concatenate(inputs, axis=-1)
-        
-        outputs = self.actor_net(inputs)
-        
-        # Initialize logit_net on first call
-        if self.logit_net is None:
-            self.logit_net = nnx.Linear(
-                in_features=outputs.shape[-1],
-                out_features=self.action_dim,
-                kernel_init=default_init(self.final_fc_init_scale),
-                rngs=self.rngs,
-            )
-        
-        logits = self.logit_net(outputs)
-        
-        distribution = distrax.Categorical(logits=logits / jnp.maximum(1e-6, temperature))
-        return distribution
-
-
-class GCValue(nnx.Module):
-    """Goal-conditioned value/critic function using flax.nnx."""
-    
-    def __init__(
-        self,
-        hidden_dims: Sequence[int],
-        layer_norm: bool = True,
-        ensemble: bool = True,
-        gc_encoder=None,
-        rngs: nnx.Rngs = None,
-    ):
-        self.ensemble = ensemble
-        self.gc_encoder = gc_encoder
-        
-        if ensemble:
-            # Create two separate value networks for ensemble
-            self.value_net1 = MLP(
-                (*hidden_dims, 1), 
-                activate_final=False, 
-                layer_norm=layer_norm,
-                rngs=rngs,
-            )
-            self.value_net2 = MLP(
-                (*hidden_dims, 1), 
-                activate_final=False, 
-                layer_norm=layer_norm,
-                rngs=rngs,
-            )
-        else:
-            self.value_net = MLP(
-                (*hidden_dims, 1), 
-                activate_final=False, 
-                layer_norm=layer_norm,
-                rngs=rngs,
-            )
-    
-    def __call__(self, observations, goals=None, actions=None):
-        """Return the value/critic function."""
-        if self.gc_encoder is not None:
-            inputs = [self.gc_encoder(observations, goals)]
-        else:
-            inputs = [observations]
-            if goals is not None:
-                inputs.append(goals)
-        if actions is not None:
-            inputs.append(actions)
-        inputs = jnp.concatenate(inputs, axis=-1)
-        
-        if self.ensemble:
-            v1 = self.value_net1(inputs).squeeze(-1)
-            v2 = self.value_net2(inputs).squeeze(-1)
-            return v1, v2
-        else:
-            v = self.value_net(inputs).squeeze(-1)
-            return v
+from impls.utils.networks_nnx import LengthNormalize, Identity, GCActor, GCDiscreteActor, GCValue
 
 
 class HIQLAgent(nnx.Module):
@@ -369,10 +136,14 @@ class HIQLAgent(nnx.Module):
     def value_loss(self, batch):
         """Compute the IVL value loss."""
         next_v1_t, next_v2_t = self.target_value(batch['next_observations'], batch['value_goals'])
+        next_v1_t = jax.lax.stop_gradient(next_v1_t)
+        next_v2_t = jax.lax.stop_gradient(next_v2_t)
         next_v_t = jnp.minimum(next_v1_t, next_v2_t)
         q = batch['rewards'] + self.config['discount'] * batch['masks'] * next_v_t
         
         v1_t, v2_t = self.target_value(batch['observations'], batch['value_goals'])
+        v1_t = jax.lax.stop_gradient(v1_t)
+        v2_t = jax.lax.stop_gradient(v2_t)
         v_t = (v1_t + v2_t) / 2
         adv = q - v_t
         
@@ -397,7 +168,9 @@ class HIQLAgent(nnx.Module):
         v1, v2 = self.value(batch['observations'], batch['low_actor_goals'])
         nv1, nv2 = self.value(batch['next_observations'], batch['low_actor_goals'])
         v = (v1 + v2) / 2
+        v = jax.lax.stop_gradient(v)
         nv = (nv1 + nv2) / 2
+        nv = jax.lax.stop_gradient(nv)
         adv = nv - v
         
         exp_a = jnp.exp(adv * self.config['low_alpha'])
@@ -433,7 +206,9 @@ class HIQLAgent(nnx.Module):
         v1, v2 = self.value(batch['observations'], batch['high_actor_goals'])
         nv1, nv2 = self.value(batch['high_actor_targets'], batch['high_actor_goals'])
         v = (v1 + v2) / 2
+        v = jax.lax.stop_gradient(v)
         nv = (nv1 + nv2) / 2
+        nv = jax.lax.stop_gradient(nv)
         adv = nv - v
         
         exp_a = jnp.exp(adv * self.config['high_alpha'])
@@ -443,6 +218,7 @@ class HIQLAgent(nnx.Module):
         target = self.goal_rep(
             jnp.concatenate([batch['observations'], batch['high_actor_targets']], axis=-1)
         )
+        target = jax.lax.stop_gradient(target)
         log_prob = dist.log_prob(target)
         
         actor_loss = -(exp_a * log_prob).mean()
@@ -569,8 +345,10 @@ def create_hiql_agent(
         ex_actions=ex_actions,
         rngs=rngs,
     )
+
+    optimizer = nnx.Optimizer(agent, optax.adamw(learning_rate=config['lr']))
     
-    return agent
+    return agent, optimizer
 
 
 def get_config():
@@ -578,7 +356,7 @@ def get_config():
     config = ml_collections.ConfigDict(
         dict(
             # Agent hyperparameters.
-            agent_name='hiql',  # Agent name.
+            agent_name='hiql_nnx',  # Agent name.
             lr=3e-4,  # Learning rate.
             batch_size=1024,  # Batch size.
             actor_hidden_dims=(512, 512, 512),  # Actor network hidden dimensions.

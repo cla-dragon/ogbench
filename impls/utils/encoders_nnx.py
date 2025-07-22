@@ -2,11 +2,12 @@ import functools
 from typing import Sequence
 
 import flax.nnx as nnx
+import jax
 import jax.numpy as jnp
 
 
 class MLP(nnx.Module):
-    """Multi-layer perceptron using flax.nnx."""
+    """Multi-layer perceptron using flax.nnx with lazy initialization."""
     
     def __init__(
         self,
@@ -21,26 +22,41 @@ class MLP(nnx.Module):
         self.activations = activations
         self.activate_final = activate_final
         self.layer_norm = layer_norm
+        self.kernel_init = kernel_init or nnx.initializers.variance_scaling(1.0, 'fan_avg', 'uniform')
+        self.rngs = rngs
         
-        if kernel_init is None:
-            kernel_init = nnx.initializers.variance_scaling(1.0, 'fan_avg', 'uniform')
-        
-        # Create layers
+        # Initialize as None, will be created on first call
+        self.layers = None
+        self.initialized = False
+    
+    def _create_layers(self, input_dim):
+        """Create layers when input dimension is known."""
+        if self.initialized:
+            return
+            
         self.layers = []
-        for i, size in enumerate(hidden_dims):
+        current_dim = input_dim
+        
+        for i, size in enumerate(self.hidden_dims):
             layer = nnx.Linear(
-                in_features=None,  # Will be inferred
+                in_features=current_dim,
                 out_features=size,
-                kernel_init=kernel_init,
-                rngs=rngs,
+                kernel_init=self.kernel_init,
+                rngs=self.rngs,
             )
             self.layers.append(layer)
+            current_dim = size
             
-            if (i + 1 < len(hidden_dims) or activate_final) and layer_norm:
-                ln = nnx.LayerNorm(num_features=size, rngs=rngs)
+            if (i + 1 < len(self.hidden_dims) or self.activate_final) and self.layer_norm:
+                ln = nnx.LayerNorm(num_features=size, rngs=self.rngs)
                 self.layers.append(ln)
+        
+        self.initialized = True
     
     def __call__(self, x):
+        if not self.initialized:
+            self._create_layers(x.shape[-1])
+        
         for i, size in enumerate(self.hidden_dims):
             # Apply linear layer
             layer_idx = i * 2 if self.layer_norm else i
@@ -52,6 +68,65 @@ class MLP(nnx.Module):
                     # Apply layer norm
                     ln_idx = layer_idx + 1
                     x = self.layers[ln_idx](x)
+        return x
+
+
+class ResNetBlock(nnx.Module):
+    """Individual ResNet block using flax.nnx."""
+    
+    def __init__(self, num_features: int, rngs: nnx.Rngs = None):
+        self.num_features = num_features
+        self.rngs = rngs
+        
+        # Initialize as None, will be created on first call
+        self.conv1 = None
+        self.conv2 = None
+        self.initialized = False
+    
+    def _create_layers(self, in_features):
+        """Create layers when input features are known."""
+        if self.initialized:
+            return
+            
+        initializer = nnx.initializers.xavier_uniform()
+        
+        self.conv1 = nnx.Conv(
+            in_features=in_features,
+            out_features=self.num_features,
+            kernel_size=(3, 3),
+            strides=1,
+            padding='SAME',
+            kernel_init=initializer,
+            rngs=self.rngs,
+        )
+        
+        self.conv2 = nnx.Conv(
+            in_features=self.num_features,
+            out_features=self.num_features,
+            kernel_size=(3, 3),
+            strides=1,
+            padding='SAME',
+            kernel_init=initializer,
+            rngs=self.rngs,
+        )
+        
+        self.initialized = True
+    
+    def __call__(self, x):
+        if not self.initialized:
+            self._create_layers(x.shape[-1])
+            
+        block_input = x
+        
+        x = nnx.relu(x)
+        x = self.conv1(x)
+        
+        x = nnx.relu(x)
+        x = self.conv2(x)
+        
+        # Residual connection
+        x = x + block_input
+        
         return x
 
 
@@ -68,27 +143,43 @@ class ResnetStack(nnx.Module):
         self.num_features = num_features
         self.num_blocks = num_blocks
         self.max_pooling = max_pooling
+        self.rngs = rngs
         
+        # Initialize as None, will be created on first call
+        self.initial_conv = None
+        self.blocks = None
+        self.initialized = False
+    
+    def _create_layers(self, in_features):
+        """Create layers when input features are known."""
+        if self.initialized:
+            return
+            
         initializer = nnx.initializers.xavier_uniform()
         
         # Initial convolution
         self.initial_conv = nnx.Conv(
-            in_features=None,  # Will be inferred
-            out_features=num_features,
+            in_features=in_features,
+            out_features=self.num_features,
             kernel_size=(3, 3),
             strides=1,
             kernel_init=initializer,
             padding='SAME',
-            rngs=rngs,
+            rngs=self.rngs,
         )
         
         # ResNet blocks
         self.blocks = []
-        for _ in range(num_blocks):
-            block = ResNetBlock(num_features, initializer, rngs=rngs)
+        for _ in range(self.num_blocks):
+            block = ResNetBlock(self.num_features, rngs=self.rngs)
             self.blocks.append(block)
+        
+        self.initialized = True
 
     def __call__(self, x):
+        if not self.initialized:
+            self._create_layers(x.shape[-1])
+            
         conv_out = self.initial_conv(x)
         
         if self.max_pooling:
@@ -103,47 +194,6 @@ class ResnetStack(nnx.Module):
             conv_out = block(conv_out)
         
         return conv_out
-
-
-class ResNetBlock(nnx.Module):
-    """Individual ResNet block using flax.nnx."""
-    
-    def __init__(self, num_features: int, initializer, rngs: nnx.Rngs = None):
-        self.num_features = num_features
-        
-        self.conv1 = nnx.Conv(
-            in_features=None,
-            out_features=num_features,
-            kernel_size=(3, 3),
-            strides=1,
-            padding='SAME',
-            kernel_init=initializer,
-            rngs=rngs,
-        )
-        
-        self.conv2 = nnx.Conv(
-            in_features=None,
-            out_features=num_features,
-            kernel_size=(3, 3),
-            strides=1,
-            padding='SAME',
-            kernel_init=initializer,
-            rngs=rngs,
-        )
-    
-    def __call__(self, x):
-        block_input = x
-        
-        x = nnx.relu(x)
-        x = self.conv1(x)
-        
-        x = nnx.relu(x)
-        x = self.conv2(x)
-        
-        # Residual connection
-        x = x + block_input
-        
-        return x
 
 
 class ImpalaEncoder(nnx.Module):
@@ -165,6 +215,7 @@ class ImpalaEncoder(nnx.Module):
         self.dropout_rate = dropout_rate
         self.mlp_hidden_dims = mlp_hidden_dims
         self.layer_norm = layer_norm
+        self.rngs = rngs
         
         # Create ResNet stacks
         self.stack_blocks = []
@@ -180,17 +231,9 @@ class ImpalaEncoder(nnx.Module):
         if dropout_rate is not None:
             self.dropout = nnx.Dropout(rate=dropout_rate, rngs=rngs)
         
-        # Layer normalization if needed
-        if layer_norm:
-            self.layer_norm_module = nnx.LayerNorm(num_features=None, rngs=rngs)
-        
-        # MLP
-        self.mlp = MLP(
-            mlp_hidden_dims, 
-            activate_final=True, 
-            layer_norm=layer_norm,
-            rngs=rngs,
-        )
+        # Layer normalization and MLP will be created on first call
+        self.layer_norm_module = None
+        self.mlp = None
 
     def __call__(self, x, train=True, cond_var=None):
         # Normalize input
@@ -207,24 +250,28 @@ class ImpalaEncoder(nnx.Module):
         conv_out = nnx.relu(conv_out)
         
         if self.layer_norm:
+            if self.layer_norm_module is None:
+                self.layer_norm_module = nnx.LayerNorm(num_features=conv_out.shape[-1], rngs=self.rngs)
             conv_out = self.layer_norm_module(conv_out)
         
         # Flatten
         out = conv_out.reshape((*x.shape[:-3], -1))
         
         # Apply MLP
+        if self.mlp is None:
+            self.mlp = MLP(
+                self.mlp_hidden_dims, 
+                activate_final=True, 
+                layer_norm=self.layer_norm,
+                rngs=self.rngs,
+            )
         out = self.mlp(out)
         
         return out
 
 
 class GCEncoder(nnx.Module):
-    """Helper module to handle inputs to goal-conditioned networks using flax.nnx.
-
-    It takes in observations (s) and goals (g) and returns the concatenation of `state_encoder(s)`, `goal_encoder(g)`,
-    and `concat_encoder([s, g])`. It ignores the encoders that are not provided. This way, the module can handle both
-    early and late fusion (or their variants) of state and goal information.
-    """
+    """Helper module to handle inputs to goal-conditioned networks using flax.nnx."""
 
     def __init__(
         self,
@@ -237,11 +284,7 @@ class GCEncoder(nnx.Module):
         self.concat_encoder = concat_encoder
 
     def __call__(self, observations, goals=None, goal_encoded=False):
-        """Returns the representations of observations and goals.
-
-        If `goal_encoded` is True, `goals` is assumed to be already encoded representations. In this case, either
-        `goal_encoder` or `concat_encoder` must be None.
-        """
+        """Returns the representations of observations and goals."""
         reps = []
         
         if self.state_encoder is not None:
@@ -258,8 +301,12 @@ class GCEncoder(nnx.Module):
                 if self.concat_encoder is not None:
                     reps.append(self.concat_encoder(jnp.concatenate([observations, goals], axis=-1)))
         
-        reps = jnp.concatenate(reps, axis=-1)
-        return reps
+        if len(reps) == 0:
+            return observations  # Fallback if no encoders provided
+        elif len(reps) == 1:
+            return reps[0]
+        else:
+            return jnp.concatenate(reps, axis=-1)
 
 
 def create_impala_encoder(rngs: nnx.Rngs, **kwargs):
