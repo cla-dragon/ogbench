@@ -1,5 +1,11 @@
 # Change log
 
+## ogbench 1.1.5 (2025-07-02)
+- Make locomotion environments compatible with the headless mode.
+
+## ogbench 1.1.4 (2025-06-17)
+- Fix the black rendering issue in locomotion environments.
+
 ## ogbench 1.1.3 (2025-06-03)
 - Add the `cube-octuple` task.
 
